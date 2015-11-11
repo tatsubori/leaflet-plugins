@@ -105,7 +105,7 @@ L.Util.extend(L.KML, {
 		}
 		return !e || e === folder;
 	},
-
+	
 	parseStyles: function(xml) {
 		var styles = {};
 		var sl = xml.getElementsByTagName('Style');
@@ -122,7 +122,7 @@ L.Util.extend(L.KML, {
 	parseStyle: function (xml) {
 		var style = {}, poptions = {}, ioptions = {}, el, id;
 
-		var attributes = { color: true, width: true, Icon: true, href: true, hotSpot: true };
+		var attributes = { color: true, width: true, Icon: true, href: true, hotSpot: true, scale: true };
 
 		function _parse(xml) {
 			var options = {};
@@ -130,8 +130,7 @@ L.Util.extend(L.KML, {
 				var e = xml.childNodes[i];
 				var key = e.tagName;
 				if (!attributes[key]) { continue; }
-				if (key === 'hotSpot')
-				{
+				if (key === 'hotSpot') {
 					for (var j = 0; j < e.attributes.length; j++) {
 						options[e.attributes[j].name] = e.attributes[j].nodeValue;
 					}
@@ -140,19 +139,90 @@ L.Util.extend(L.KML, {
 					if (key === 'color') {
 						options.opacity = parseInt(value.substring(0, 2), 16) / 255.0;
 						options.color = '#' + value.substring(6, 8) + value.substring(4, 6) + value.substring(2, 4);
+					} else if (key === 'bgColor' || key == 'textColor') {
+						options[key] = '#' + value.substring(6, 8) + value.substring(4, 6) + value.substring(2, 4);
 					} else if (key === 'width') {
 						options.weight = value;
 					} else if (key === 'Icon') {
 						ioptions = _parse(e);
 						if (ioptions.href) { options.href = ioptions.href; }
+						if (ioptions.scale) { options.scale = ioptions.scale; }
 					} else if (key === 'href') {
 						options.href = value;
+					} else if (key === 'scale') {
+						options.scale = parseFloat(value);
 					}
 				}
 			}
 			return options;
 		}
+		
+		function _abgr2rgba(kml_abgr) {
+			var a = parseInt(kml_abgr.substring(0, 2), 16) / 255.0;
+			var r = parseInt(kml_abgr.substring(6, 8), 16);
+			var g = parseInt(kml_abgr.substring(4, 6), 16);
+			var b = parseInt(kml_abgr.substring(2, 4), 16);
+			return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+		}
+		
+		function _cssclass_for_id(id) {
+			// thanks http://stackoverflow.com/questions/7627000/javascript-convert-string-to-safe-class-name-for-css
+			function makeSafeForCSS(name) {
+			    return name.replace(/[^a-z0-9]/g, function(s) {
+			        var c = s.charCodeAt(0);
+			        if (c == 32) return '-';
+			        if (c >= 65 && c <= 90) return '_' + s.toLowerCase();
+			        return '__' + ('000' + c.toString(16)).slice(-4);
+			    });
+			}
+			
+			return 'leaflet-plugins-kml-popup-' + makeSafeForCSS(xml.getAttribute('id'));
+		}
 
+		function _parseBalloonStyle(xml) {
+			var options = {};
+			for (var i = 0; i < xml.childNodes.length; i++) {
+				var e = xml.childNodes[i];
+				var key = e.tagName;
+				var value = e.childNodes[0] ? e.childNodes[0].nodeValue : null;
+				if (key === 'bgColor' || key == 'textColor') {
+					options[key] = _abgr2rgba(value);
+				} else if (key === 'text') {
+					options.text = value;
+				} else if (key === 'displayMode') {
+					options.displayModeHide = (value === "hide");
+				}				
+			}
+			
+			if (options.bgColor || options.textColor) {
+				options.className = _cssclass_for_id(xml.getAttribute('id'));
+				var css = '';
+				if (options.bgColor) {
+					css += '.' + options.className + ' .leaflet-popup-content-wrapper, .leaflet-popup-tip {' +
+						'background-color: ' + options.bgColor + '}';
+				}
+				if (options.textColor) {
+					css += '.' + options.className + ' .leaflet-popup-content {' +
+						'color: ' + options.textColor + '}';
+				}
+				
+				var doc = xml.ownerDocument;
+				var head = document.head || document.getElementsByTagName('head')[0]
+				var cssstyle = doc.createElement('style');
+				cssstyle.type = 'text/css';
+				if (cssstyle.styleSheet){
+					cssstyle.styleSheet.cssText = css;
+				} else {
+					cssstyle.appendChild(document.createTextNode(css));
+				}
+				head.appendChild(cssstyle);
+			}
+			
+			return options;
+		}
+		
+		// TODO we also need LabelStyle handled
+		
 		el = xml.getElementsByTagName('LineStyle');
 		if (el && el[0]) { style = _parse(el[0]); }
 		el = xml.getElementsByTagName('PolyStyle');
@@ -162,13 +232,18 @@ L.Util.extend(L.KML, {
 		el = xml.getElementsByTagName('IconStyle');
 		if (el && el[0]) { ioptions = _parse(el[0]); }
 		if (ioptions.href) {
+			var scale = ioptions.scale ? ioptions.scale : 1.0;
 			style.icon = new L.KMLIcon({
 				iconUrl: ioptions.href,
+				// TODO should consider the original proportion
+				iconSize: [ 32 * scale, 32 * scale ],
 				shadowUrl: null,
 				anchorRef: {x: ioptions.x, y: ioptions.y},
 				anchorType:	{x: ioptions.xunits, y: ioptions.yunits}
 			});
 		}
+		el = xml.getElementsByTagName('BalloonStyle');
+		if (el && el[0]) { style.popup = _parseBalloonStyle(el[0]); }
 		
 		id = xml.getAttribute('id');
 		if (id && style) {
@@ -273,24 +348,34 @@ L.Util.extend(L.KML, {
 			layer = new L.FeatureGroup(layers);
 		}
 
-		var name, descr = '';
-		el = place.getElementsByTagName('name');
-		if (el.length && el[0].childNodes.length) {
-			name = el[0].childNodes[0].nodeValue;
-		}
-		el = place.getElementsByTagName('description');
-		for (i = 0; i < el.length; i++) {
-			for (j = 0; j < el[i].childNodes.length; j++) {
-				descr = descr + el[i].childNodes[j].nodeValue;
-			}
-		}
-
-		if (name) {
+		if (! (options.popup && options.popup.displayModeHide)) {
 			layer.on('add', function(e) {
-				layer.bindPopup('<h2>' + name + '</h2>' + descr);
+				if (options.popup && options.popup.text) {
+					// TODO should replace $[name], $[description], $[address], $[id], $[Snippet]
+					// c.f. https://developers.google.com/kml/documentation/kmlreference#balloonstyle
+					layer.bindPopup(options.popup.text, options.popup);
+				} else {
+					var name, descr = '';
+					el = place.getElementsByTagName('name');
+					if (el.length && el[0].childNodes.length) {
+						name = el[0].childNodes[0].nodeValue;
+					}
+					el = place.getElementsByTagName('description');
+					for (i = 0; i < el.length; i++) {
+						for (j = 0; j < el[i].childNodes.length; j++) {
+							descr = descr + el[i].childNodes[j].nodeValue;
+						}
+					}
+					if (descr) {
+						// GoogleEarth shows it only when description is set
+						layer.bindPopup('<b>' + name + '</b><br/>' + descr, options.popup ? options.popup : {});						
+					}
+				}
 			});
 		}
 
+		// TODO we also need a label from its name
+		
 		return layer;
 	},
 
